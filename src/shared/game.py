@@ -1,42 +1,53 @@
-from typing import Dict, List
-from dataclasses import dataclass
+from typing import Dict
+from abc import ABC, abstractmethod
 
-from threading import Lock
+from pyray import Vector2
 
 
-@dataclass
-class Vector2:
-    x: float
-    y: float
+class Event(ABC):
+    pass
+
+
+class EventHandler(ABC):
+    @abstractmethod
+    def handle_event(self, event: Event): ...
 
 
 class Player:
     name: str
     position: Vector2
+    velocity: Vector2
 
     def __init__(self, name: str) -> None:
         self.name = name
+        self.position = Vector2(0, 0)
+        self.velocity = Vector2(0, 0)
+
+    def update(self, delta_time):
+        self.position.x += self.velocity.x * delta_time
+        self.position.y += self.velocity.y * delta_time
 
 
 class Game:
     players: Dict[str, Player]
-    lock: Lock
+    event_handler: EventHandler
 
-    def __init__(self) -> None:
+    def __init__(self, event_handler: EventHandler) -> None:
         self.players = {}
-        self.lock = Lock()
+        self.event_handler = event_handler
 
     def append_player(self, player: Player) -> bool:
-        with self.lock:
-            if player.name in self.players.keys():
-                return False
+        if player.name in self.players.keys():
+            return False
 
-            self.players[player.name] = player
+        self.players[player.name] = player
 
         return True
 
 
     def remove_player(self, player: Player):
-        with self.lock:
-            self.players.pop(player.name)
+        self.players.pop(player.name)
 
+    def update(self, delta_time: float):
+        for player in self.players.values():
+            player.update(delta_time)

@@ -1,3 +1,3 @@
 #!/bin/sh
 
-python -m src.server
+python3 -m src.server

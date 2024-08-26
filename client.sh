@@ -1,3 +1,3 @@
 #!/bin/sh
 
-python -m src.client
+python3 -m src.client

@@ -1,50 +1,88 @@
-import socket
+from queue import Queue
 import threading
+import signal
+import time
 
-from ..shared.game import Game
+from ..shared.game import Game, Player
 from ..shared.settings import SERVER_ADDRESS
-
-from . import thread
-
-
-game = Game()
-client_threads = []
+from ..shared.net import Address, HelloStruct, MessageSocket, PlayerConnectStruct, PlayerUpdateStruct
 
 
-def check_threads():
-    global client_threads
+class Clock:
+    previous: float
+    delta: float
 
-    while True:
-        client_threads = [t for t in client_threads if t.is_alive()]
+    def __init__(self) -> None:
+        self.previous = time.time()
 
-def stop_all():
-    global client_threads
+    def tick(self, tps: float) -> None:
+        current = time.time()
+        whole_time = 1 / tps
+        self.delta = current - self.previous
 
-    for thread in client_threads:
-        thread.stop()
+        if self.delta < whole_time:
+            time.sleep(whole_time - self.delta)
+        self.previous = current
 
-    client_threads.clear()
 
 
 def main():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock = MessageSocket()
     sock.bind(SERVER_ADDRESS)
-    sock.listen(5)
 
-    threading.Thread(target=check_threads)
+    queue = Queue()
+    stop_event = threading.Event()
+    recieve_thread = sock.create_recieve_thread(queue, stop_event)
+    recieve_thread.start()
 
-    try:
-        while True:
-            client_sock, address = sock.accept()
-            client_thread = thread.ClientThread(client_sock, address, game)
-            client_thread.start()
-            client_threads.append(client_thread)
-    except KeyboardInterrupt:
-        exit(1)
-    except Exception as e:
-        print(e)
-        exit(1)
-    finally:
-        stop_all()
+    clock = Clock()
+
+    def handle_sigint(signum, _):
+        assert signum == signal.SIGINT
+
+        print("\nStopping server")
+
+        stop_event.set()
         sock.close()
+        exit(0)
+
+
+    signal.signal(signal.SIGINT, handle_sigint)
+
+    handler = None
+    game = Game(handler)
+
+    addresses: dict[str, Address] = {}
+
+    while True:
+        clock.tick(60)
+        while queue.qsize() > 0:
+            message, address = queue.get_nowait()
+            if isinstance(message, PlayerConnectStruct):
+                player = Player(message.name.decode())
+                addresses[player.name] = address
+                game.append_player(player)
+                sock.send(HelloStruct(len(game.players)), address)
+            elif isinstance(message, PlayerUpdateStruct):
+                try:
+                    player = game.players[message.name.decode()]
+                    player.velocity.x = message.vel_x
+                    player.velocity.y = message.vel_y
+                except:
+                    pass
+
+        game.update(clock.delta)
+
+        for current_player in game.players.values():
+            address = addresses[current_player.name]
+            for player in game.players.values():
+                msg = PlayerUpdateStruct(
+                    player.name.encode(),
+                    player.position.x,
+                    player.position.y,
+                    player.velocity.x,
+                    player.velocity.y,
+                )
+
+                sock.send(msg, address)
 

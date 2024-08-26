@@ -1,103 +1,144 @@
-from dataclasses import dataclass
-import dataclasses
+from dataclasses import astuple, dataclass
+from io import BytesIO
 import socket
 from enum import IntEnum
+from threading import Event, Thread
 from typing import ClassVar, NamedTuple
 from struct import Struct
+from queue import Queue
 
 
-Address = NamedTuple('Address', [("host", str), ("port", int)])
+Address = NamedTuple("Address", [("host", str), ("port", int)])
+
+
+@dataclass
+class HelloStruct:
+    struct: ClassVar[Struct] = Struct("i")
+
+    player_count: int
+
+
+@dataclass
+class PlayerConnectStruct:
+    struct: ClassVar[Struct] = Struct("160s")
+
+    name: bytes
+
+
+@dataclass
+class PlayerRejectStruct:
+    struct: ClassVar[Struct] = Struct("400s")
+
+    message: bytes
+
+
+@dataclass
+class PlayerUpdateStruct:
+    struct: ClassVar[Struct] = Struct("160sffff")
+
+    name: bytes
+    pos_x: float
+    pos_y: float
+    vel_x: float
+    vel_y: float
+
+
+StructBase = HelloStruct | PlayerConnectStruct | PlayerRejectStruct | PlayerUpdateStruct
 
 
 class MessageKind(IntEnum):
     Hello = 0
     PlayerConnect = 1
     PlayerReject = 2
+    PlayerUpdate = 3
+
+
+KIND_TO_TYPE: dict[MessageKind, type[StructBase]] = {
+    MessageKind.Hello: HelloStruct,
+    MessageKind.PlayerConnect: PlayerConnectStruct,
+    MessageKind.PlayerReject: PlayerRejectStruct,
+    MessageKind.PlayerUpdate: PlayerUpdateStruct
+}
+
+
+TYPE_TO_KIND = { v: k for k, v in KIND_TO_TYPE.items() }
 
 
 @dataclass
 class Header:
-    struct: ClassVar[Struct] = Struct("<ii")
+    struct: ClassVar[Struct] = Struct("ii")
 
     length: int
     kind: MessageKind
 
 
-    def pack(self) -> bytes:
-        return Header.struct.pack(*dataclasses.astuple(self))
+class MessageSocket:
+    sock: socket.socket
 
-    @staticmethod
-    def unpack(hdr: bytes) -> "Header":
-        return Header(*Header.struct.unpack(hdr))
+    def __init__(self) -> None:
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setblocking(False)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+    def bind(self, address: Address) -> None:
+        self.sock.bind(address)
 
-@dataclass
-class Message:
-    struct: ClassVar[Struct]
+    def close(self):
+        self.sock.close()
 
-    @staticmethod
-    def create(header: Header, body: bytes) -> "Message":
-        match header.kind:
-            case MessageKind.Hello:
-                return HelloMessage.unpack(body)
-            case MessageKind.PlayerConnect:
-                return PlayerConnectMessage.unpack(body)
-            case MessageKind.PlayerReject:
-                return PlayerRejectMessage.unpack(body)
+    def create_recieve_thread(
+            self,
+            queue: Queue[tuple[StructBase, Address]],
+            stop_event: Event
+    ) -> Thread:
+        def target():
+            while not stop_event.is_set():
+                try:
+                    struct, address = self.recieve()
+                    if struct is not None:
+                        queue.put((struct, address))
+                except BlockingIOError:
+                    pass
+                except OSError as e:
+                    if not stop_event.is_set():
+                        raise e
 
-        raise ValueError()
+        return Thread(target=target)
 
+    def recieve(self) -> tuple[StructBase | None, Address]:
+        io = BytesIO()
+        io.seek(512)
+        io.write(b'\x00')
+        io.seek(0)
+        io.getbuffer
 
-    def pack(self) -> bytes:
-        return self.struct.pack(*dataclasses.astuple(self))
+        bytes_recieved, address = self.sock.recvfrom_into(io.getbuffer(), 512);
 
+        if bytes_recieved < Header.struct.size:
+            return None, address
 
-    @classmethod
-    def unpack(cls, body: bytes) -> "Message":
-        obj = cls.__new__(cls)
-        cls.__init__(obj, *cls.struct.unpack(body))
-        return obj
+        header = Header(*Header.struct.unpack(io.read(Header.struct.size)))
 
+        body = io.read(header.length)
+        if len(body) != header.length:
+            return None, address
 
-@dataclass
-class HelloMessage(Message):
-    struct: ClassVar[Struct] = Struct("<i")
+        if header.kind not in KIND_TO_TYPE:
+            return None, address
 
-    player_count: int
+        struct_type = KIND_TO_TYPE[header.kind]
 
-
-@dataclass
-class PlayerConnectMessage(Message):
-    struct: ClassVar[Struct] = Struct('<120s')
-
-    name: bytes
-
-
-@dataclass
-class PlayerRejectMessage(Message):
-    struct: ClassVar[Struct] = Struct('<1024s')
-
-    message: bytes
-
-
-def recieve(sock: socket.socket) -> Message:
-    header = Header.unpack(sock.recv(Header.struct.size))
-    body = sock.recv(header.length)
-    return Message.create(header, body)
+        return struct_type(*struct_type.struct.unpack(body)), address
 
 
-def send(sock: socket.socket, message: Message) -> None:
-    if isinstance(message, HelloMessage):
-        kind = MessageKind.Hello
-    elif isinstance(message, PlayerConnectMessage):
-        kind = MessageKind.PlayerConnect
-    elif isinstance(message, PlayerRejectMessage):
-        kind = MessageKind.PlayerReject
-    else:
-        raise ValueError()
+    def send(self, message: StructBase, address: Address) -> None:
+        io = BytesIO()
 
-    body = message.pack()
-    header = Header(len(body), kind)
-    sock.sendall(header.pack())
-    sock.sendall(body)
+        kind = TYPE_TO_KIND[type(message)]
+        body = message.struct.pack(*astuple(message))
+        header = Header.struct.pack(*astuple(Header(len(body), kind)))
+        io.write(header)
+        io.write(body)
+
+        self.sock.sendto(io.getbuffer(), address)
 
