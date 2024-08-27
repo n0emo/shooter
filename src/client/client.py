@@ -1,12 +1,13 @@
 from enum import IntEnum
 from queue import Queue
 import threading
+from time import sleep
 
 import pyray as rl
 from raylib import ffi
 
 from ..shared import net
-from ..shared import game as shared_game
+from ..shared.game import Game, Player
 from ..shared.settings import SERVER_ADDRESS
 
 
@@ -16,10 +17,9 @@ class GameState(IntEnum):
     Disconnected = 3
 
 
-game = shared_game.Game(None)
+game = Game(None)
 state = GameState.Menu
 sock = net.MessageSocket()
-#sock.bind(net.Address('0.0.0.0', 51257))
 
 name_input = ffi.new("char[160]") # type: ignore
 pointer = ffi.addressof(name_input) # type: ignore
@@ -30,13 +30,20 @@ recieve_thread = None
 
 current_player = None
 
-def connect(player: shared_game.Player):
+def connect(player: Player):
     sock.sock.setblocking(True)
     sock.send(net.PlayerConnectStruct(player.name.encode()), SERVER_ADDRESS)
     hello, _ = sock.recieve()
     assert isinstance(hello, net.HelloStruct)
     sock.sock.setblocking(False)
 
+
+def disconnect(player: Player):
+    stop_event.set()
+    sleep(0.01)
+    sock.sock.setblocking(True)
+    sock.send(net.PlayerDisconnectStruct(player.name.encode()), SERVER_ADDRESS)
+    sock.sock.setblocking(False)
 
 def main():
     global state
@@ -51,7 +58,10 @@ def main():
     rl.init_window(800, 600, "Shooter")
     rl.set_target_fps(60)
 
-    while not rl.window_should_close():
+    should_close = False
+    while not should_close:
+        should_close = rl.window_should_close()
+
         match state:
             case GameState.Menu:
                 rl.draw_text("Enter your name", 100, 50, 48, rl.WHITE)
@@ -68,31 +78,48 @@ def main():
                     name = ffi.string(name_input)
                     assert isinstance(name, bytes)
                     name = name.decode()
-                    player = shared_game.Player(name)
+                    player = Player(name)
                     try:
                         connect(player)
                         state = GameState.Started
                         recieve_thread = sock.create_recieve_thread(queue, stop_event)
                         recieve_thread.start()
                         current_player = player
+                        game.append_player(current_player)
                     except Exception as e:
                         print(e)
                         raise e
 
             case GameState.Started:
+                assert isinstance(current_player, Player)
+
+                if should_close:
+                    disconnect(current_player)
+                    break
+
                 while queue.qsize() > 0:
                     message, address = queue.get_nowait()
-                    if isinstance(message, net.PlayerUpdateStruct):
-                        player = shared_game.Player(message.name.decode())
+                    if isinstance(message, net.PlayerConnectStruct):
+                        name = message.name_decoded
+                        player = Player(name)
                         game.append_player(player)
-                        player = game.players[message.name.decode()]
 
-                        player.position.x = message.pos_x
-                        player.position.y = message.pos_y
-                        player.velocity.x = message.vel_x
-                        player.velocity.y = message.vel_y
+                    elif isinstance(message, net.PlayerUpdateStruct):
+                        name = message.name_decoded
+                        if name in game.players:
+                            player = game.players[message.name_decoded]
 
-                assert isinstance(current_player, shared_game.Player)
+                            player.position.x = message.pos_x
+                            player.position.y = message.pos_y
+                            player.velocity.x = message.vel_x
+                            player.velocity.y = message.vel_y
+
+                    elif isinstance(message, net.PlayerDisconnectStruct):
+                        name = message.name_decoded
+                        if name in game.players:
+                            game.players.pop(name)
+
+
                 x = 0
                 y = 0
                 speed = 100

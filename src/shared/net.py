@@ -11,6 +11,10 @@ from queue import Queue
 Address = NamedTuple("Address", [("host", str), ("port", int)])
 
 
+def decode(s: bytes) -> str:
+    return s.decode().rstrip('\x00')
+
+
 @dataclass
 class HelloStruct:
     struct: ClassVar[Struct] = Struct("i")
@@ -24,12 +28,20 @@ class PlayerConnectStruct:
 
     name: bytes
 
+    @property
+    def name_decoded(self) -> str:
+        return decode(self.name)
+
 
 @dataclass
 class PlayerRejectStruct:
     struct: ClassVar[Struct] = Struct("400s")
 
     message: bytes
+
+    @property
+    def message_decoded(self) -> str:
+        return decode(self.message)
 
 
 @dataclass
@@ -42,8 +54,29 @@ class PlayerUpdateStruct:
     vel_x: float
     vel_y: float
 
+    @property
+    def name_decoded(self) -> str:
+        return decode(self.name)
 
-StructBase = HelloStruct | PlayerConnectStruct | PlayerRejectStruct | PlayerUpdateStruct
+
+@dataclass
+class PlayerDisconnectStruct:
+    struct: ClassVar[Struct] = Struct("160s")
+
+    name: bytes
+
+    @property
+    def name_decoded(self) -> str:
+        return decode(self.name)
+
+
+StructBase = (
+      HelloStruct
+    | PlayerConnectStruct
+    | PlayerRejectStruct
+    | PlayerUpdateStruct
+    | PlayerDisconnectStruct
+)
 
 
 class MessageKind(IntEnum):
@@ -51,13 +84,15 @@ class MessageKind(IntEnum):
     PlayerConnect = 1
     PlayerReject = 2
     PlayerUpdate = 3
+    PlayerDisconnect = 4
 
 
 KIND_TO_TYPE: dict[MessageKind, type[StructBase]] = {
-    MessageKind.Hello: HelloStruct,
-    MessageKind.PlayerConnect: PlayerConnectStruct,
-    MessageKind.PlayerReject: PlayerRejectStruct,
-    MessageKind.PlayerUpdate: PlayerUpdateStruct
+    MessageKind.Hello:            HelloStruct,
+    MessageKind.PlayerConnect:    PlayerConnectStruct,
+    MessageKind.PlayerReject:     PlayerRejectStruct,
+    MessageKind.PlayerUpdate:     PlayerUpdateStruct,
+    MessageKind.PlayerDisconnect: PlayerDisconnectStruct,
 }
 
 

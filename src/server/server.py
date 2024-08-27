@@ -5,7 +5,7 @@ import time
 
 from ..shared.game import Game, Player
 from ..shared.settings import SERVER_ADDRESS
-from ..shared.net import Address, HelloStruct, MessageSocket, PlayerConnectStruct, PlayerUpdateStruct
+from ..shared.net import Address, HelloStruct, MessageSocket, PlayerConnectStruct, PlayerDisconnectStruct, PlayerUpdateStruct
 
 
 class Clock:
@@ -37,6 +37,8 @@ def main():
 
     clock = Clock()
 
+    player_updates: dict[str, float] = {}
+
     def handle_sigint(signum, _):
         assert signum == signal.SIGINT
 
@@ -54,22 +56,42 @@ def main():
 
     addresses: dict[str, Address] = {}
 
+    def disconnect_player(name: str) -> None:
+        if name in addresses:
+            game.players.pop(name)
+            addresses.pop(name)
+            player_updates.pop(name)
+            for n in game.players.keys():
+                message = PlayerDisconnectStruct(name.encode())
+                sock.send(message, addresses[n])
+
     while True:
         clock.tick(60)
         while queue.qsize() > 0:
             message, address = queue.get_nowait()
             if isinstance(message, PlayerConnectStruct):
-                player = Player(message.name.decode())
-                addresses[player.name] = address
+                player = Player(message.name_decoded)
                 game.append_player(player)
                 sock.send(HelloStruct(len(game.players)), address)
+                for name, _ in addresses.items():
+                    sock.send(PlayerConnectStruct(name.encode()), address)
+
+                for a in addresses.values():
+                    sock.send(message, a)
+                addresses[player.name] = address
+
+
             elif isinstance(message, PlayerUpdateStruct):
-                try:
-                    player = game.players[message.name.decode()]
+                name = message.name_decoded
+                if name in game.players:
+                    player = game.players[message.name_decoded]
                     player.velocity.x = message.vel_x
                     player.velocity.y = message.vel_y
-                except:
-                    pass
+                    player_updates[name] = time.time()
+
+            elif isinstance(message, PlayerDisconnectStruct):
+                disconnect_player(message.name_decoded)
+
 
         game.update(clock.delta)
 
@@ -85,4 +107,8 @@ def main():
                 )
 
                 sock.send(msg, address)
+
+        for player, updated in list(player_updates.items()):
+            if time.time() - updated > 5:
+                disconnect_player(player)
 
